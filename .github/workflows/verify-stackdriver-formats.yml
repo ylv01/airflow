@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Verify Stackdriver list formats
+on:
+  push:
+    branches: [verify/stackdriver-format-fallback]
+permissions:
+  contents: read
+  packages: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      ANSWER: "yes"
+      PYTHONUTF8: "1"
+      GITHUB_REPOSITORY: apache/airflow
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - name: Install development tools
+        run: |
+          uv tool install prek
+          ./scripts/tools/setup_breeze
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Pull upstream Breeze image
+        id: image
+        run: breeze ci-image pull --python 3.10 --github-repository apache/airflow
+      - name: Regular static checks
+        if: always()
+        run: prek run --stage pre-commit --files providers/google/src/airflow/providers/google/cloud/operators/stackdriver.py providers/google/tests/unit/google/cloud/operators/test_stackdriver.py
+      - name: Manual static checks
+        if: always() && steps.image.outcome == 'success'
+        env:
+          GITHUB_REPOSITORY: apache/airflow
+          PYTHON_MAJOR_MINOR_VERSION: "3.10"
+        run: prek run --stage manual --skip compile-ui-assets-dev --skip view-skill-eval --skip run-skill-eval-codex --files providers/google/src/airflow/providers/google/cloud/operators/stackdriver.py providers/google/tests/unit/google/cloud/operators/test_stackdriver.py
+      - name: Operator and hook unit tests
+        if: always() && steps.image.outcome == 'success'
+        run: breeze run --python 3.10 --github-repository apache/airflow --skip-image-upgrade-check pytest providers/google/tests/unit/google/cloud/operators/test_stackdriver.py providers/google/tests/unit/google/cloud/hooks/test_stackdriver.py -q
+      - name: Prove new tests fail without the fix
+        if: always() && steps.image.outcome == 'success'
+        run: |
+          source=providers/google/src/airflow/providers/google/cloud/operators/stackdriver.py
+          trap 'git restore "$source"' EXIT
+          git show 0f52c5f:"$source" > "$source"
+          set +e
+          breeze run --python 3.10 --github-repository apache/airflow --skip-image-upgrade-check pytest providers/google/tests/unit/google/cloud/operators/test_stackdriver.py -k unrecognized_format --tb=short -q 2>&1 | tee regression.log
+          result=${PIPESTATUS[0]}
+          set -e
+          test "$result" -ne 0
+          grep -q "6 failed" regression.log
+      - name: Selective checks
+        if: always()
+        run: breeze ci selective-check --commit-ref 9a8715e
+
